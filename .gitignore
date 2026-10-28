@@ -1,0 +1,21 @@
+# Python
+__pycache__/
+*.pyc
+.venv/
+
+# PyInstaller output
+build/
+dist/
+
+# Videos processed while testing
+*.mp4
+*.mov
+*.m4v
+*.mkv
+*.webm
+*.avi
+*.part
+
+# IDE
+.idea/
+.vscode/
