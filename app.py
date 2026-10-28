@@ -23,7 +23,7 @@ except ImportError:
     TkinterDnD = None
     DnDMixin = object
 
-__version__ = "1.0.0"
+__version__ = "1.1.0"
 
 STUDIO_URL = "https://www.tiktok.com/tiktokstudio/upload"
 FFMPEG_URL = "https://www.gyan.dev/ffmpeg/builds/"
@@ -188,6 +188,7 @@ class App(ctk.CTk, DnDMixin):
         self.rows: dict[int, VideoRow] = {}
         self._ids = count()
         self.force_encode = ctk.BooleanVar(value=False)
+        self.keep_4k = ctk.BooleanVar(value=False)
 
         self.title("TikTok HD Uploader")
         self.geometry("900x720")
@@ -271,6 +272,11 @@ class App(ctk.CTk, DnDMixin):
                       text_color=MUTED, command=self._clear).pack(side="right")
         ctk.CTkSwitch(bar, text="Всегда перекодировать", variable=self.force_encode,
                       font=font(12), text_color=MUTED, progress_color=PINK,
+                      button_color=TEXT, button_hover_color="#ffffff",
+                      fg_color=SECONDARY, switch_width=36, switch_height=18
+                      ).pack(side="right", padx=(0, 14))
+        ctk.CTkSwitch(bar, text="Сохранять 4K (эксперимент)", variable=self.keep_4k,
+                      font=font(12), text_color=MUTED, progress_color=CYAN,
                       button_color=TEXT, button_hover_color="#ffffff",
                       fg_color=SECONDARY, switch_width=36, switch_height=18
                       ).pack(side="right", padx=(0, 14))
@@ -417,19 +423,20 @@ class App(ctk.CTk, DnDMixin):
             row = VideoRow(self.list, str(p), on_error=self._show_error)
             row.pack(fill="x", pady=5, padx=(0, 6))
             self.rows[rid] = row
-            self.jobs.put((rid, str(p), self.force_encode.get()))
+            self.jobs.put((rid, str(p), self.force_encode.get(), self.keep_4k.get()))
         self._update_count()
 
     # ---------- background work ----------
 
     def _worker(self):
         while True:
-            rid, src, force = self.jobs.get()
+            rid, src, force, keep_4k = self.jobs.get()
             name = Path(src).name
             log = lambda msg, n=name: self.events.put(("log", f"[{n}] {msg}"))
             plan = lambda info, mode, _reason, r=rid: self.events.put(("plan", r, info, mode))
             try:
-                out, mode = core.process(src, force_encode=force, log=log, on_plan=plan)
+                out, mode = core.process(src, force_encode=force, log=log, on_plan=plan,
+                                         keep_4k=keep_4k)
                 self.events.put(("done", rid, out, mode))
             except Exception as exc:
                 self.events.put(("log", f"[{name}] ошибка: {exc}"))

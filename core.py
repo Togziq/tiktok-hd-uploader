@@ -99,7 +99,20 @@ def describe(info: dict | None) -> str:
     return " · ".join(parts)
 
 
-def choose_mode(path: str, info: dict | None, force_encode: bool) -> tuple[str, str]:
+def target_short_side(info: dict, keep_4k: bool) -> int | None:
+    """Short side to downscale to, or None to keep the resolution.
+
+    By default everything is brought to 1080p. With keep_4k, resolution is kept
+    unless a side exceeds TikTok's 4096 px upload limit, then it goes to 2160p.
+    """
+    short, long = sorted((info["width"], info["height"]))
+    if not keep_4k:
+        return 1080 if short > 1080 else None
+    return 2160 if long > 4096 else None
+
+
+def choose_mode(path: str, info: dict | None, force_encode: bool,
+                keep_4k: bool = False) -> tuple[str, str]:
     """Return (mode, reason)."""
     if force_encode:
         return "encode", "включена принудительная перекодировка"
@@ -114,8 +127,9 @@ def choose_mode(path: str, info: dict | None, force_encode: bool) -> tuple[str, 
         return "encode", f"кодек {info['codec']} не подходит"
     if "10" in info["pix_fmt"] or "12" in info["pix_fmt"]:
         return "encode", f"{info['pix_fmt']} — перевожу в 8 бит"
-    if min(info["width"], info["height"]) > 1080:
-        return "encode", f"{info['width']}x{info['height']} — уменьшаю до 1080p"
+    target = target_short_side(info, keep_4k)
+    if target:
+        return "encode", f"{info['width']}x{info['height']} — уменьшаю до {target}p"
     if info["fps"] > 61:
         return "encode", f"{info['fps']:.0f} fps — снижаю до 60"
     if not is_mp4:
@@ -123,18 +137,20 @@ def choose_mode(path: str, info: dict | None, force_encode: bool) -> tuple[str, 
     return "patch", "исходник подходит, качество не трогаю"
 
 
-def _encode(ffmpeg: str, src: str, dst: str, info: dict | None):
+def _encode(ffmpeg: str, src: str, dst: str, info: dict | None, keep_4k: bool):
     filters = []
     if info and info["hdr"]:
         filters.append(
             "zscale=t=linear:npl=100,format=gbrpf32le,zscale=p=bt709,"
             "tonemap=tonemap=hable:desat=0,zscale=t=bt709:m=bt709:r=tv"
         )
-    if info and min(info["width"], info["height"]) > 1080:
+    target = target_short_side(info, keep_4k) if info else None
+    if target:
         if info["width"] <= info["height"]:
-            filters.append("scale=1080:-2:flags=lanczos")
+            filters.append(f"scale={target}:-2:flags=lanczos")
         else:
-            filters.append("scale=-2:1080:flags=lanczos")
+            filters.append(f"scale=-2:{target}:flags=lanczos")
+    out_short = target or (min(info["width"], info["height"]) if info else 1080)
     if info and info["fps"] > 61:
         filters.append("fps=60")
     filters.append("format=yuv420p")
@@ -144,7 +160,9 @@ def _encode(ffmpeg: str, src: str, dst: str, info: dict | None):
         ffmpeg, "-y", "-i", src,
         "-map", "0:v:0", "-map", "0:a:0?",
         "-vf", ",".join(filters),
-        "-c:v", "libx264", "-preset", "slow", "-crf", "16", "-profile:v", "high",
+        # "slow" on 4K takes ages, "medium" keeps encode times sane at the same CRF
+        "-c:v", "libx264", "-preset", "slow" if out_short <= 1080 else "medium",
+        "-crf", "16", "-profile:v", "high",
         "-c:a", "aac", "-b:a", "256k",
         "-movflags", "+faststart", dst,
     ]
@@ -172,7 +190,8 @@ def output_path(src: str) -> str:
     return str(p.with_name(f"{p.stem}_tiktok.mp4"))
 
 
-def process(src: str, force_encode: bool = False, log=print, on_plan=None) -> tuple[str, str]:
+def process(src: str, force_encode: bool = False, log=print, on_plan=None,
+            keep_4k: bool = False) -> tuple[str, str]:
     """Prepare src for upload. Returns (output path, mode).
 
     on_plan(info, mode, reason) is called once the mode is chosen, before the slow part.
@@ -180,7 +199,7 @@ def process(src: str, force_encode: bool = False, log=print, on_plan=None) -> tu
     info = probe(src)
     if info:
         log(describe(info))
-    mode, reason = choose_mode(src, info, force_encode)
+    mode, reason = choose_mode(src, info, force_encode, keep_4k)
     log(f"режим: {MODE_LABELS[mode]} ({reason})")
     if on_plan:
         on_plan(info, mode, reason)
@@ -198,7 +217,10 @@ def process(src: str, force_encode: bool = False, log=print, on_plan=None) -> tu
                 else "перепаковываю...")
             # ffmpeg picks the muxer by extension, so give it a real .mp4 name
             tmp_mp4 = tmp + ".mp4"
-            (_encode if mode == "encode" else _remux)(ffmpeg, src, tmp_mp4, info)
+            if mode == "encode":
+                _encode(ffmpeg, src, tmp_mp4, info, keep_4k)
+            else:
+                _remux(ffmpeg, src, tmp_mp4, info)
             os.replace(tmp_mp4, tmp)
         patcher.patch_mp4_mvhd(tmp)
         os.replace(tmp, dst)
@@ -223,6 +245,7 @@ def preview(path: str):
 
 if __name__ == "__main__":
     force = "--encode" in sys.argv
+    keep = "--4k" in sys.argv
     for arg in sys.argv[1:]:
         if not arg.startswith("--"):
-            process(arg, force_encode=force)
+            process(arg, force_encode=force, keep_4k=keep)
