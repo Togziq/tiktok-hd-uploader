@@ -15,6 +15,7 @@ import customtkinter as ctk
 from PIL import Image
 
 import core
+import methods
 
 try:
     from tkinterdnd2 import DND_FILES, TkinterDnD
@@ -23,7 +24,7 @@ except ImportError:
     TkinterDnD = None
     DnDMixin = object
 
-__version__ = "1.1.0"
+__version__ = "1.2.0"
 
 STUDIO_URL = "https://www.tiktok.com/tiktokstudio/upload"
 FFMPEG_URL = "https://www.gyan.dev/ffmpeg/builds/"
@@ -189,6 +190,8 @@ class App(ctk.CTk, DnDMixin):
         self._ids = count()
         self.force_encode = ctk.BooleanVar(value=False)
         self.keep_4k = ctk.BooleanVar(value=False)
+        self.method_labels = {label: key for key, (label, _desc) in methods.METHODS.items()}
+        self.method = ctk.StringVar(value=methods.METHODS[methods.DEFAULT][0])
 
         self.title("TikTok HD Uploader")
         self.geometry("900x720")
@@ -200,6 +203,7 @@ class App(ctk.CTk, DnDMixin):
 
         self._build_header()
         self._build_dropzone()
+        self._build_methods()
         self._build_list()
         self._build_footer()
 
@@ -262,9 +266,32 @@ class App(ctk.CTk, DnDMixin):
             self.dnd_bind("<<DropLeave>>", lambda e: self._highlight(False) or e.action)
             self.dnd_bind("<<Drop>>", self._on_drop)
 
+    def _build_methods(self):
+        bar = ctk.CTkFrame(self, fg_color="transparent")
+        bar.pack(fill="x", padx=24, pady=(14, 0))
+        ctk.CTkLabel(bar, text="Метод патча", font=font(12, True),
+                     text_color=TEXT).pack(side="left", padx=(0, 10))
+        ctk.CTkOptionMenu(bar, values=list(self.method_labels), variable=self.method,
+                          width=250, height=28, corner_radius=8, font=font(12),
+                          dropdown_font=font(12), fg_color=SECONDARY,
+                          button_color=SECONDARY_HOVER, button_hover_color=BORDER,
+                          dropdown_fg_color=CARD, dropdown_hover_color=SECONDARY,
+                          text_color=TEXT, command=lambda _v: self._show_method_hint()
+                          ).pack(side="left")
+        self.method_hint = ctk.CTkLabel(bar, text="", font=font(11), text_color=MUTED,
+                                        anchor="w")
+        self.method_hint.pack(side="left", padx=(12, 0))
+        self._show_method_hint()
+
+    def _selected_method(self) -> str:
+        return self.method_labels[self.method.get()]
+
+    def _show_method_hint(self):
+        self.method_hint.configure(text=methods.METHODS[self._selected_method()][1])
+
     def _build_list(self):
         bar = ctk.CTkFrame(self, fg_color="transparent")
-        bar.pack(fill="x", padx=24, pady=(20, 6))
+        bar.pack(fill="x", padx=24, pady=(14, 6))
         self.count_label = ctk.CTkLabel(bar, text="Видео", font=font(15, True), text_color=TEXT)
         self.count_label.pack(side="left")
         ctk.CTkButton(bar, text="Очистить готовые", width=10, height=28, corner_radius=8,
@@ -416,27 +443,28 @@ class App(ctk.CTk, DnDMixin):
             if p.is_dir() or p.suffix.lower() not in core.VIDEO_EXTS:
                 self._log(f"пропускаю {p.name}: не видео")
                 continue
-            if p.stem.endswith("_tiktok"):
+            if core.is_output(str(p)):
                 self._log(f"пропускаю {p.name}: он уже обработан")
                 continue
             rid = next(self._ids)
             row = VideoRow(self.list, str(p), on_error=self._show_error)
             row.pack(fill="x", pady=5, padx=(0, 6))
             self.rows[rid] = row
-            self.jobs.put((rid, str(p), self.force_encode.get(), self.keep_4k.get()))
+            self.jobs.put((rid, str(p), self.force_encode.get(), self.keep_4k.get(),
+                           self._selected_method()))
         self._update_count()
 
     # ---------- background work ----------
 
     def _worker(self):
         while True:
-            rid, src, force, keep_4k = self.jobs.get()
+            rid, src, force, keep_4k, method = self.jobs.get()
             name = Path(src).name
             log = lambda msg, n=name: self.events.put(("log", f"[{n}] {msg}"))
             plan = lambda info, mode, _reason, r=rid: self.events.put(("plan", r, info, mode))
             try:
                 out, mode = core.process(src, force_encode=force, log=log, on_plan=plan,
-                                         keep_4k=keep_4k)
+                                         keep_4k=keep_4k, method=method)
                 self.events.put(("done", rid, out, mode))
             except Exception as exc:
                 self.events.put(("log", f"[{name}] ошибка: {exc}"))

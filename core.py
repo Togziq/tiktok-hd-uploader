@@ -8,7 +8,7 @@ import subprocess
 import sys
 from pathlib import Path
 
-import tiktok_lossless_patch as patcher
+import methods
 
 NO_WINDOW = 0x08000000 if os.name == "nt" else 0  # CREATE_NO_WINDOW
 HDR_TRANSFERS = {"smpte2084", "arib-std-b67"}
@@ -112,7 +112,7 @@ def target_short_side(info: dict, keep_4k: bool) -> int | None:
 
 
 def choose_mode(path: str, info: dict | None, force_encode: bool,
-                keep_4k: bool = False) -> tuple[str, str]:
+                keep_4k: bool = False, method: str = methods.DEFAULT) -> tuple[str, str]:
     """Return (mode, reason)."""
     if force_encode:
         return "encode", "включена принудительная перекодировка"
@@ -121,6 +121,8 @@ def choose_mode(path: str, info: dict | None, force_encode: bool,
         if is_mp4:
             return "patch", "ffmpeg не найден, патчу как есть"
         raise RuntimeError("для этого формата нужен ffmpeg, а он не найден")
+    if method in methods.H264_ONLY and info["codec"] != "h264":
+        return "encode", f"метод {methods.METHODS[method][0]} работает только с H.264"
     if info["hdr"]:
         return "encode", "HDR-видео, перевожу в SDR"
     if info["codec"] not in PASSTHROUGH_CODECS:
@@ -137,7 +139,8 @@ def choose_mode(path: str, info: dict | None, force_encode: bool,
     return "patch", "исходник подходит, качество не трогаю"
 
 
-def _encode(ffmpeg: str, src: str, dst: str, info: dict | None, keep_4k: bool):
+def _encode(ffmpeg: str, src: str, dst: str, info: dict | None, keep_4k: bool,
+            faststart: bool = True):
     filters = []
     if info and info["hdr"]:
         filters.append(
@@ -164,19 +167,23 @@ def _encode(ffmpeg: str, src: str, dst: str, info: dict | None, keep_4k: bool):
         "-c:v", "libx264", "-preset", "slow" if out_short <= 1080 else "medium",
         "-crf", "16", "-profile:v", "high",
         "-c:a", "aac", "-b:a", "256k",
-        "-movflags", "+faststart", dst,
     ]
+    if faststart:
+        cmd += ["-movflags", "+faststart"]
+    cmd.append(dst)
     result = _run(cmd)
     if result.returncode != 0:
         raise RuntimeError(f"ffmpeg: ошибка перекодировки\n{result.stderr[-600:]}")
 
 
-def _remux(ffmpeg: str, src: str, dst: str, info: dict):
+def _remux(ffmpeg: str, src: str, dst: str, info: dict, faststart: bool = True):
     cmd = [
         ffmpeg, "-y", "-i", src,
         "-map", "0:v:0", "-map", "0:a:0?",
-        "-c", "copy", "-movflags", "+faststart",
+        "-c", "copy",
     ]
+    if faststart:
+        cmd += ["-movflags", "+faststart"]
     if info["codec"] == "hevc":
         cmd += ["-tag:v", "hvc1"]
     cmd.append(dst)
@@ -185,13 +192,21 @@ def _remux(ffmpeg: str, src: str, dst: str, info: dict):
         raise RuntimeError(f"ffmpeg: ошибка перепаковки\n{result.stderr[-600:]}")
 
 
-def output_path(src: str) -> str:
+def output_path(src: str, method: str = methods.DEFAULT) -> str:
+    """name_tiktok.mp4 for the default method, name_tiktok_<method>.mp4 for the rest,
+    so several methods can be tried on one video side by side."""
     p = Path(src)
-    return str(p.with_name(f"{p.stem}_tiktok.mp4"))
+    suffix = "_tiktok" if method == methods.DEFAULT else f"_tiktok_{method}"
+    return str(p.with_name(f"{p.stem}{suffix}.mp4"))
+
+
+def is_output(path: str) -> bool:
+    stem = Path(path).stem
+    return stem.endswith("_tiktok") or any(stem.endswith(f"_tiktok_{m}") for m in methods.METHODS)
 
 
 def process(src: str, force_encode: bool = False, log=print, on_plan=None,
-            keep_4k: bool = False) -> tuple[str, str]:
+            keep_4k: bool = False, method: str = methods.DEFAULT) -> tuple[str, str]:
     """Prepare src for upload. Returns (output path, mode).
 
     on_plan(info, mode, reason) is called once the mode is chosen, before the slow part.
@@ -199,12 +214,12 @@ def process(src: str, force_encode: bool = False, log=print, on_plan=None,
     info = probe(src)
     if info:
         log(describe(info))
-    mode, reason = choose_mode(src, info, force_encode, keep_4k)
-    log(f"режим: {MODE_LABELS[mode]} ({reason})")
+    mode, reason = choose_mode(src, info, force_encode, keep_4k, method)
+    log(f"режим: {MODE_LABELS[mode]} ({reason}), метод: {methods.METHODS[method][0]}")
     if on_plan:
         on_plan(info, mode, reason)
 
-    dst = output_path(src)
+    dst = output_path(src, method)
     tmp = dst + ".part"
     try:
         if mode == "patch":
@@ -217,12 +232,13 @@ def process(src: str, force_encode: bool = False, log=print, on_plan=None,
                 else "перепаковываю...")
             # ffmpeg picks the muxer by extension, so give it a real .mp4 name
             tmp_mp4 = tmp + ".mp4"
+            faststart = method not in methods.NO_FASTSTART
             if mode == "encode":
-                _encode(ffmpeg, src, tmp_mp4, info, keep_4k)
+                _encode(ffmpeg, src, tmp_mp4, info, keep_4k, faststart)
             else:
-                _remux(ffmpeg, src, tmp_mp4, info)
+                _remux(ffmpeg, src, tmp_mp4, info, faststart)
             os.replace(tmp_mp4, tmp)
-        patcher.patch_mp4_mvhd(tmp)
+        methods.apply(method, tmp, src)
         os.replace(tmp, dst)
     finally:
         for leftover in (tmp, tmp + ".mp4"):
@@ -246,6 +262,8 @@ def preview(path: str):
 if __name__ == "__main__":
     force = "--encode" in sys.argv
     keep = "--4k" in sys.argv
+    chosen = next((a.split("=", 1)[1] for a in sys.argv if a.startswith("--method=")),
+                  methods.DEFAULT)
     for arg in sys.argv[1:]:
         if not arg.startswith("--"):
-            process(arg, force_encode=force, keep_4k=keep)
+            process(arg, force_encode=force, keep_4k=keep, method=chosen)

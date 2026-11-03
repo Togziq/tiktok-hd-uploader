@@ -8,8 +8,19 @@ at commit `f2a4ed9536578b689d2c642943a287bb1da4fc65`.
 
 License: MIT, Copyright (c) 2026 miles. Full text: [licenses/tiktok-lossless-upload.txt](licenses/tiktok-lossless-upload.txt).
 
-This app only calls its `patch_mp4_mvhd` function, which works offline.
-The rest of that module (including the remote config download) is not used.
+This app calls its `patch_mp4_mvhd` function and, for the "Audio inflation" method,
+`patch_mp4` with the built-in config. Both work offline: the remote config download is not used.
+
+## tiktok-quality
+
+The "Ghost frames" method calls [tiktok-quality](https://github.com/BastienGimbert/tiktok-quality)
+1.0.0 (installed from PyPI and bundled into the .exe). License: MIT, Copyright (c) 2026 Bastien GIMBERT.
+
+## Other methods
+
+The "mvhd чистый" and "Zilem / CompressBase" methods in `methods.py` are reimplemented after
+[aminoulogie/videocodec](https://github.com/aminoulogie/videocodec) and
+[technicaljazi2021-ops/Tiktok-Method-](https://github.com/technicaljazi2021-ops/Tiktok-Method-).
 
 ## Libraries bundled into the .exe
 
